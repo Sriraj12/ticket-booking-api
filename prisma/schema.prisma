@@ -1,0 +1,389 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+//////////////////////////////////////////////////
+// ENUMS
+//////////////////////////////////////////////////
+
+enum SeatType {
+  REGULAR
+  PREMIUM
+  RECLINER
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+}
+
+//////////////////////////////////////////////////
+// ROLE
+//////////////////////////////////////////////////
+
+model Role {
+  id        Int    @id @default(autoincrement())
+  role_name String @unique
+
+  users User[]
+}
+
+//////////////////////////////////////////////////
+// USER
+//////////////////////////////////////////////////
+
+model User {
+  id        Int     @id @default(autoincrement())
+  name      String
+  email     String  @unique
+  password  String
+  phone     String?
+  is_active Boolean @default(true)
+
+  role_id Int
+  role    Role @relation(fields: [role_id], references: [id])
+
+  // Seller → owns theaters
+  theaters Theater[]
+
+  // User → bookings
+  bookings Booking[]
+
+  // Temporary seat locks
+  seatLocks SeatLock[]
+
+  sellerRevenues SellerRevenue[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([role_id])
+}
+
+//////////////////////////////////////////////////
+// THEATER
+//////////////////////////////////////////////////
+
+model Theater {
+  id Int @id @default(autoincrement())
+
+  theater_name String
+
+  // Existing
+  location      String
+  city          String
+  state         String
+  location_link String?
+
+  // NEW FIELDS
+  latitude  Float?
+  longitude Float?
+
+  // Google Place ID
+  google_place_id String?
+
+  // Optional full formatted address
+  formatted_address String?
+
+  approval_status ApprovalStatus @default(PENDING)
+
+  is_active Boolean @default(true)
+
+  seller_id Int
+
+  seller User @relation(fields: [seller_id], references: [id], onDelete: Cascade)
+
+  sellerRevenues SellerRevenue[]
+
+  screens Screen[]
+  shows   Show[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([seller_id])
+  @@index([city])
+  // IMPORTANT
+  @@index([latitude, longitude])
+}
+
+//////////////////////////////////////////////////
+// SCREEN
+//////////////////////////////////////////////////
+
+model Screen {
+  id Int @id @default(autoincrement())
+
+  screen_name String
+  total_seats Int
+  is_active   Boolean @default(true)
+
+  theater_id Int
+  theater    Theater @relation(fields: [theater_id], references: [id], onDelete: Cascade)
+
+  seats Seat[]
+  shows Show[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([theater_id])
+}
+
+//////////////////////////////////////////////////
+// SEAT
+//////////////////////////////////////////////////
+
+model Seat {
+  id Int @id @default(autoincrement())
+
+  row_name    String // A, B, C
+  seat_number String // 1, 2, 3
+
+  seat_type SeatType
+  price     Float? // Notice the '?'
+
+  is_active Boolean @default(true)
+
+  screen_id Int
+  screen    Screen @relation(fields: [screen_id], references: [id], onDelete: Cascade)
+
+  bookingSeats BookingSeat[]
+  seatLocks    SeatLock[]
+
+  created_at DateTime @default(now())
+
+  // Prevent duplicate seats inside same screen
+  @@unique([screen_id, row_name, seat_number])
+  @@index([screen_id])
+}
+
+//////////////////////////////////////////////////
+// MOVIE
+//////////////////////////////////////////////////
+
+model Movie {
+  id Int @id @default(autoincrement())
+
+  title    String
+  language String
+  duration Int // in minutes
+  genre    String
+
+  release_date DateTime
+
+  poster_url  String?
+  trailer_url String?
+
+  is_active Boolean @default(true)
+
+  shows Show[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+}
+
+//////////////////////////////////////////////////
+// SHOW
+//////////////////////////////////////////////////
+
+model Show {
+  id Int @id @default(autoincrement())
+
+  show_start_time DateTime
+  show_end_time   DateTime
+
+  base_price Float
+
+  is_active Boolean @default(true)
+
+  movie_id   Int
+  theater_id Int
+  screen_id  Int
+
+  movie Movie @relation(fields: [movie_id], references: [id], onDelete: Cascade)
+
+  theater Theater @relation(fields: [theater_id], references: [id], onDelete: Cascade)
+
+  screen Screen @relation(fields: [screen_id], references: [id], onDelete: Cascade)
+
+  bookings       Booking[]
+  bookingSeats   BookingSeat[]
+  seatLocks      SeatLock[]
+  sellerRevenues SellerRevenue[]
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([movie_id])
+  @@index([theater_id])
+  @@index([screen_id])
+  @@index([show_start_time])
+  // For overlap validation
+  @@index([screen_id, show_start_time, show_end_time])
+}
+
+//////////////////////////////////////////////////
+// BOOKING
+//////////////////////////////////////////////////
+
+model Booking {
+  id Int @id @default(autoincrement())
+
+  total_amount Float
+
+  booking_status BookingStatus @default(PENDING)
+  payment_status PaymentStatus @default(PENDING)
+
+  user_id Int
+  show_id Int
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  show Show @relation(fields: [show_id], references: [id], onDelete: Cascade)
+
+  bookingSeats  BookingSeat[]
+  payments      Payment[]
+  sellerRevenue SellerRevenue?
+
+  booked_at  DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@index([user_id])
+  @@index([show_id])
+}
+
+//////////////////////////////////////////////////
+// BOOKING SEAT
+//////////////////////////////////////////////////
+
+model BookingSeat {
+  id Int @id @default(autoincrement())
+
+  booking_id Int
+  show_id    Int
+  seat_id    Int
+
+  price Float
+
+  booking Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+
+  show Show @relation(fields: [show_id], references: [id], onDelete: Cascade)
+
+  seat Seat @relation(fields: [seat_id], references: [id], onDelete: Cascade)
+
+  // Prevent double booking
+  @@unique([show_id, seat_id])
+  @@index([booking_id])
+  @@index([show_id])
+  @@index([seat_id])
+}
+
+//////////////////////////////////////////////////
+// SEAT LOCK
+//////////////////////////////////////////////////
+
+model SeatLock {
+  id Int @id @default(autoincrement())
+
+  user_id Int
+  show_id Int
+  seat_id Int
+
+  expires_at DateTime
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  show Show @relation(fields: [show_id], references: [id], onDelete: Cascade)
+
+  seat Seat @relation(fields: [seat_id], references: [id], onDelete: Cascade)
+
+  // Prevent duplicate temporary lock
+  @@unique([show_id, seat_id])
+  @@index([expires_at])
+  @@index([user_id])
+  @@index([show_id])
+}
+
+//////////////////////////////////////////////////
+// PAYMENT
+//////////////////////////////////////////////////
+
+model Payment {
+  id Int @id @default(autoincrement())
+
+  payment_gateway String // Razorpay / Stripe
+
+  payment_status PaymentStatus @default(PENDING)
+
+  transaction_id String @unique
+
+  booking_id Int
+
+  booking Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+
+  paid_at DateTime @default(now())
+
+  @@index([booking_id])
+}
+
+/////////////////////////////////////////////////////////////
+// Seller Revenue
+////////////////////////////////////////////////////////////
+
+model SellerRevenue {
+  id Int @id @default(autoincrement())
+
+  booking_id Int @unique
+  seller_id  Int
+  theater_id Int
+  show_id    Int
+
+  total_amount        Float
+  platform_commission Float
+  seller_earning      Float
+
+  settlement_status SettlementStatus @default(PENDING)
+
+  settled_at DateTime?
+
+  created_at DateTime @default(now())
+
+  booking Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+
+  seller User @relation(fields: [seller_id], references: [id])
+
+  theater Theater @relation(fields: [theater_id], references: [id])
+
+  show Show @relation(fields: [show_id], references: [id])
+
+  @@index([seller_id])
+  @@index([settlement_status])
+}
