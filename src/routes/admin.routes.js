@@ -16,6 +16,12 @@ router.get("/theaters",
     adminController.getAllTheaters
 );
 
+router.get("/theater/:id",
+    verifyToken,
+    isAdmin,
+    adminController.getTheaterDetails
+);
+
 router.put(
   "/theater/approval",
   verifyToken,

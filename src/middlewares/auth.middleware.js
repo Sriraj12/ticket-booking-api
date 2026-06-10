@@ -33,9 +33,6 @@ exports.isSeller = (req, res, next) => {
 }
 
 exports.isUser = (req, res, next) => {
-
-    console.log("User Role ID:", req.user.role_id); // Debugging line
-
     if (req.user.role_id !== 3) {
         return res.status(403).json({ message: "User only" });
     }

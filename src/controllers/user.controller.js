@@ -5,7 +5,80 @@ const jwt = require("jsonwebtoken");
 const PDFDocument = require("pdfkit");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
 const { bookingLogger, paymentLogger } = require("../utils/logger");
+
+const fetchImageBuffer = (url, redirects = 0) => {
+    return new Promise((resolve, reject) => {
+        if (!url) return resolve(null);
+
+        // Support data URIs directly
+        if (url.startsWith("data:")) {
+            try {
+                const base64 = url.split(",")[1];
+                return resolve(Buffer.from(base64, "base64"));
+            } catch (e) {
+                return reject(new Error("Invalid data URI for image"));
+            }
+        }
+
+        if (redirects > 5) return reject(new Error("Too many redirects while fetching image"));
+
+        const client = url.startsWith("https") ? https : http;
+
+        const defaultHeaders = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "image/*,*/*;q=0.8",
+            "Referer": "https://en.wikipedia.org/"
+        };
+
+        const req = client.get(url, { headers: defaultHeaders }, (res) => {
+            // Follow redirects
+            if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+                const location = res.headers.location;
+                if (!location) return reject(new Error("Redirect location missing"));
+                return resolve(fetchImageBuffer(location, redirects + 1));
+            }
+
+            if (res.statusCode === 403 && redirects === 0) {
+                // Retry once with a safer referer (some CDNs block hotlinking)
+                console.warn(`fetchImageBuffer: 403 for ${url}, retrying with alternate referer`);
+                return resolve(fetchImageBuffer(url, redirects + 1));
+            }
+
+            if (res.statusCode !== 200) {
+                // Not fatal — resolve null so PDF generation continues
+                console.warn(`fetchImageBuffer: got status ${res.statusCode} for ${url}`);
+                return resolve(null);
+            }
+
+            const contentType = (res.headers["content-type"] || "").toLowerCase();
+
+            const chunks = [];
+            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("end", () => {
+                const buffer = Buffer.concat(chunks);
+                if (contentType && !contentType.startsWith("image/")) {
+                    console.warn(`fetchImageBuffer: content-type ${contentType} for ${url} (not an image)`);
+                }
+                resolve(buffer);
+            });
+        });
+
+        req.on("error", (err) => {
+            console.warn(`fetchImageBuffer error for ${url}:`, err.message);
+            resolve(null);
+        });
+
+        // timeout safety
+        req.setTimeout(5000, () => {
+            req.abort();
+            console.warn(`fetchImageBuffer timeout for ${url}`);
+            resolve(null);
+        });
+    });
+};
 
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
@@ -272,9 +345,9 @@ exports.lockSeats = async (req, res) => {
             }
         });
 
-        console.log("Checking locks for show ID:", show_id, "seat IDs:", seat_ids);
+        // console.log("Checking locks for show ID:", show_id, "seat IDs:", seat_ids);
 
-        console.log("Already booked seats:", alreadyBooked);
+        // console.log("Already booked seats:", alreadyBooked);
 
         if (alreadyBooked.length > 0) {
             return res.status(400).json({
@@ -310,6 +383,13 @@ exports.lockSeats = async (req, res) => {
         await prisma.seatLock.createMany({
             data: locks,
             skipDuplicates: true
+        });
+
+        const io = req.app.get("io");
+
+        io.to(`show-${show_id}`).emit("seat-locked", {
+            show_id,
+            seat_ids
         });
 
         res.json({
@@ -755,6 +835,13 @@ exports.unlockSeats = async (req, res) => {
                 user_id: Number(req.user.id),
                 show_id: Number(req.body.show_id),
             }
+        });
+
+        const io = req.app.get("io");
+
+        io.to(`show-${show_id}`).emit("seat-unlocked", {
+            show_id,
+            seat_ids
         });
 
         return res.status(200).json({
@@ -1217,97 +1304,148 @@ exports.downloadTicket = async (req, res) => {
             });
         }
 
-        // 1. Fetch booking with joins
-        const booking = await prisma.booking.findUnique({
-            where: { id: bookingId },
-            include: {
-                show: {
-                    include: {
-                        movie: true,
-                        theater: true,
-                        screen: true
-                    }
-                },
-                bookingSeats: {
-                    include: {
-                        seat: true
-                    }
-                },
-                user: true
-            }
-        });
+            const booking = await prisma.booking.findUnique({
+                where: { id: bookingId },
+                include: {
+                    show: {
+                        include: {
+                            movie: true,
+                            theater: true,
+                            screen: true
+                        }
+                    },
+                    bookingSeats: {
+                        include: {
+                            seat: true
+                        }
+                    },
+                    user: true
+                }
+            });
 
-        if (!booking) {
-            return res.status(404).json({
-                message: "Booking not found"
+            if (!booking) {
+                return res.status(404).json({
+                    message: "Booking not found"
+                });
+            }
+
+            const qrPayload = {
+                booking_id: booking.id,
+                user_id: booking.user_id,
+                show_id: booking.show_id
+            };
+
+            const token = jwt.sign(qrPayload, process.env.JWT_SECRET);
+            const qrImage = await QRCode.toDataURL(token);
+            const qrBuffer = Buffer.from(qrImage.split(",")[1], "base64");
+
+            let posterBuffer = null;
+            try {
+                console.info("downloadTicket: poster_url ->", booking.show?.movie?.poster_url);
+                posterBuffer = await fetchImageBuffer(booking.show.movie.poster_url);
+                console.info("downloadTicket: posterBuffer ->", posterBuffer ? `${posterBuffer.length} bytes` : "null");
+            } catch (posterError) {
+                console.warn("Poster load failed:", posterError.message);
+            }
+
+            const doc = new PDFDocument({ size: "A4", margin: 40 });
+
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename=ticket-${booking.id}.pdf`
+            );
+
+            doc.pipe(res);
+
+            if (posterBuffer) {
+                try {
+                    doc.image(posterBuffer, {
+                        fit: [520, 240],
+                        align: "center",
+                        valign: "center"
+                    });
+                    doc.moveDown();
+                } catch (posterError) {
+                    console.warn("Failed to render poster image:", posterError.message);
+                }
+            }
+
+            // Styles
+            const primaryColor = "#0f172a"; // slate-900
+            const accentColor = "#0ea5a4"; // teal-400
+            const muted = "#6b7280"; // gray-500
+
+            // Header: movie title
+            doc.fillColor(primaryColor).font("Helvetica-Bold").fontSize(26).text(booking.show.movie.title, { align: "center" });
+            doc.moveDown(0.2);
+
+            // Subheader: theater + screen
+            doc.font("Helvetica").fontSize(10).fillColor(muted).text(`${booking.show.theater.theater_name} • ${booking.show.theater.city}, ${booking.show.theater.state}`, { align: "center" });
+            doc.text(`Screen: ${booking.show.screen.screen_name}`, { align: "center" });
+            doc.moveDown(0.8);
+
+            // Divider
+            doc.strokeColor("#e6eef0").lineWidth(1).moveTo(doc.page.margins.left, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).stroke();
+            doc.moveDown(0.6);
+
+            // Two-column layout: left = details, right = QR
+            const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+            const qrSize = 160;
+            const gap = 20;
+            const leftWidth = contentWidth - qrSize - gap;
+
+            const colX = doc.x;
+            const colY = doc.y;
+
+            // Left column - details
+            doc.save();
+            doc.x = colX;
+            doc.y = colY;
+
+            doc.font("Helvetica-Bold").fontSize(14).fillColor(primaryColor).text("Ticket Details", { width: leftWidth });
+            doc.moveDown(0.2);
+
+            doc.fontSize(10).fillColor(muted);
+            const label = (k) => { doc.font("Helvetica-Bold").fillColor(primaryColor).text(k, { continued: true, width: 80 }); doc.font("Helvetica").fillColor("#111827"); };
+
+            label("Booking ID: "); doc.text(` ${booking.id}`);
+            label("Name: "); doc.text(` ${booking.user.name}`);
+            const showStart = booking.show.show_start_time ? new Date(booking.show.show_start_time) : null;
+            const showTimeText = showStart ? `${showStart.toLocaleString()}` : 'N/A';
+            label("Show Time: "); doc.text(` ${showTimeText}`);
+            label("Seats: "); doc.text(` ${booking.bookingSeats.map(bs => bs.seat.seat_number).join(", ")}`);
+            label("Total Paid: "); doc.text(`Rs.${booking.total_amount}`);
+
+            doc.restore();
+
+            // Right column - QR code
+            const qrX = doc.page.width - doc.page.margins.right - qrSize;
+            const qrY = colY;
+            try {
+                doc.image(qrBuffer, qrX, qrY, { fit: [qrSize, qrSize], align: "center" });
+            } catch (e) {
+                console.warn("Failed to render QR image:", e.message);
+            }
+
+            // QR caption
+            const captionY = qrY + qrSize + 8;
+            doc.font("Helvetica").fontSize(10).fillColor(muted).text("Scan this QR code at the entrance", qrX - 10, captionY, { width: qrSize + 20, align: "center" });
+
+            // Footer note
+            doc.moveTo(doc.page.margins.left, doc.page.height - doc.page.margins.bottom - 60);
+            doc.fontSize(9).fillColor(muted).text("Valid only for the show listed above.", { align: "center" });
+
+            doc.end();
+        } catch (error) {
+            console.error("PDF ERROR:", error);
+
+            return res.status(500).json({
+                message: "Server error",
+                error: error.message
             });
         }
-
-        // 2. Generate QR (JWT)
-        const qrPayload = {
-            booking_id: booking.id,
-            user_id: booking.user_id,
-            show_id: booking.show_id
-        };
-
-        const token = jwt.sign(qrPayload, process.env.JWT_SECRET);
-
-        const qrImage = await QRCode.toDataURL(token);
-
-        // 3. Create PDF
-        const doc = new PDFDocument();
-
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader(
-            "Content-Disposition",
-            `attachment; filename=ticket-${booking.id}.pdf`
-        );
-
-        doc.pipe(res);
-
-        doc.fontSize(20).text("🎟 Movie Ticket", { align: "center" });
-        doc.moveDown();
-
-        doc.fontSize(12).text(`Booking ID: ${booking.id}`);
-        doc.text(`Name: ${booking.user.name}`);
-        doc.text(`Movie: ${booking.show.movie.title}`);
-        doc.text(`Theater: ${booking.show.theater.theater_name}`);
-        doc.text(`Screen: ${booking.show.screen.screen_name}`);
-
-        doc.text(
-            `Show Time: ${new Date(booking.show.start_time).toLocaleString()}`
-        );
-
-        doc.text(
-            `Seats: ${booking.bookingSeats
-                .map(bs => bs.seat.seat_number)
-                .join(", ")}`
-        );
-
-        doc.text(`Total Paid: ₹${booking.total_amount}`);
-        doc.moveDown();
-
-        const qrBuffer = Buffer.from(qrImage.split(",")[1], "base64");
-
-        doc.image(qrBuffer, {
-            fit: [150, 150],
-            align: "center"
-        });
-
-        doc.moveDown();
-        doc.text("Scan at entry", { align: "center" });
-
-        doc.end();
-
-    } catch (error) {
-        console.error("PDF ERROR:", error);
-
-        return res.status(500).json({
-            message: "Server error",
-            error: error.message
-        });
-    }
-};
+    };
 
 exports.cancelBooking = async (req, res) => {
     try {

@@ -93,6 +93,11 @@ exports.getAllTheaters = async (req, res) => {
                         name: true,
                         email: true
                     }
+                },
+                screens: {
+                    where: {
+                        theater_id: prisma.theater.id
+                    }
                 }
             },
             orderBy: {
@@ -113,6 +118,52 @@ exports.getAllTheaters = async (req, res) => {
             message: "Failed to fetch theaters",
             systemError: error.message 
         });
+    }
+};
+
+exports.getTheaterDetails = async (req, res) => {
+    try {
+        const { theaterId } = req.params;
+
+        const theater = await prisma.theater.findUnique({
+            where: {
+                id: Number(theaterId)
+            },
+            include: {
+                seller: {
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true
+                    }
+                },
+                screens: {
+                    include: {
+                        seats: true
+                    }
+                }
+            }
+        });
+
+        if (!theater) {
+            return res.status(404).json({
+                message: "Theater not found"
+            });
+        }
+
+        return res.status(200).json({
+            message: "Theater details fetched successfully",
+            theater
+        });
+
+    } catch (error) {
+        console.error("Error fetching theater details:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch theater details",
+            systemError: error.message 
+        }); 
     }
 };
 
