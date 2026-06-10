@@ -2,6 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const http = require("http");
+const { Server } = require("socket.io");
 require("dotenv").config();
 
 const requestLogger = require("./middlewares/requestLogger");
@@ -16,6 +18,7 @@ const screenRoutes = require("./routes/screen.routes");
 const seatRoutes = require("./routes/seat.routes");
 const showRoutes = require("./routes/show.routes");
 const adminMovieRoutes = require("./routes/adminMovie.routes");
+const commonRoutes = require("./routes/common.routes");
 const requestIdMiddleware = require("./middlewares/requestId");
 const startSeatLockCleanupJob = require("./cron/seatLockCleanup.cron");
 
@@ -39,13 +42,47 @@ app.use("/api/screen", screenRoutes);
 app.use("/api/seat", seatRoutes);
 app.use("/api/show", showRoutes);
 app.use("/api/admin/movie", adminMovieRoutes);
-
+app.use("/api/common", commonRoutes);
 app.use(errorLogger);
 startSeatLockCleanupJob();
 
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+app.set("io", io);
+
+io.on("connection", (socket) => {
+
+    console.log("Socket connected:", socket.id);
+
+    socket.on("join-show", (showId) => {
+
+        socket.join(`show-${showId}`);
+
+        console.log(
+            `Socket ${socket.id} joined show-${showId}`
+        );
+    });
+
+    socket.on("disconnect", () => {
+        console.log("Socket disconnected:", socket.id);
+    });
+});
 
 app.get("/", (req, res) => {
   res.send("Movie Booking API Running");
 });
 
-module.exports = app;
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+
+// module.exports = app;

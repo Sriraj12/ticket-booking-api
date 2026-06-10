@@ -97,10 +97,7 @@ exports.createShow = async (req, res) => {
                 where: { screen_id: screen_id, seat_type: "PREMIUM" },
                 data: { price: parseFloat(premium_ticket_price) }
             });
-
-            // Senior Debug Log: Print out exactly how many seats matched and updated in terminal
-            console.log(`Seat updates logs -> Regular: ${regularUpdate.count}, Recliner: ${reclinerUpdate.count}, Premium: ${premiumUpdate.count}`);
-
+            
             return newShow;
         });
 

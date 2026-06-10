@@ -4,6 +4,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/server.js",
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -19,15 +20,20 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "geolib": "^3.3.14",
+    "google-auth-library": "^10.6.2",
     "helmet": "^8.1.0",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "node-cron": "^4.2.1",
+    "oidc-provider": "^9.8.4",
     "pdfkit": "^0.18.0",
     "prisma": "^5.22.0",
     "qrcode": "^1.5.4",
     "razorpay": "^2.9.6",
+    "redis": "^5.12.1",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
     "uuid": "^14.0.0",
     "winston": "^3.19.0",
     "winston-daily-rotate-file": "^5.0.0"
